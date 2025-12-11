@@ -3,7 +3,6 @@
   "minVersion": "0.8",
   "package": "com.build_9.hyxin.impl.mixins",
   "mixins": [
-    "AssetRegistryAccess",
     "ExampleMixin"
   ]
 }
