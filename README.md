@@ -19,6 +19,11 @@ Both [FabricMC's Mixin fork](https://github.com/FabricMC/Mixin) and [LlamaLad7's
 are available by default. You should be able to use any features added by either project, however not everything is
 production ready yet.
 
+## Loading & Installing
+The Hyxin plugin can go in any valid `earlyplugins` folder. Plugins that rely on Hyxin must be in the servers 
+`earlyplugins` folder. On a server, you will make this folder right next to your `plugins` and `logs` folder. In 
+singleplayer your plugin needs to go in the worlds `earlyplugins` folder.
+
 ## Getting Started
 The Hyxin project is not on Maven yet. You can download it from Discord or build it yourself for now. 
 

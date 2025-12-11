@@ -1,5 +1,6 @@
 package com.build_9.hyxin.scanner;
 
+import com.build_9.hyxin.Constants;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
@@ -33,6 +34,7 @@ public class PluginScanner {
         if (!dir.isDirectory()) {
             throw new IllegalArgumentException("Can not load plugins from '" + dir.getAbsolutePath() + "'. It is not a directory!");
         }
+        Constants.log("Scanning for plugins in '" + dir.getAbsolutePath() + "'.");
         for (File candidate : Objects.requireNonNull(dir.listFiles())) {
             if (candidate.isFile() && candidate.getName().toLowerCase(Locale.ROOT).endsWith(".jar")) {
                 try {
