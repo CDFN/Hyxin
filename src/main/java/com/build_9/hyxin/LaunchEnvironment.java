@@ -1,15 +1,17 @@
 package com.build_9.hyxin;
 
 import org.objectweb.asm.ClassReader;
+import sun.misc.Unsafe;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLClassLoader;
-import java.util.Set;
 
 /**
  * Provides a unified environment for managing and resolving classes and resources across multiple class loaders used
@@ -21,10 +23,29 @@ import java.util.Set;
 public class LaunchEnvironment {
 
     private static LaunchEnvironment instance;
+    private static MethodHandles.Lookup trustedLookup;
 
     private final ClassLoader systemLoader;
     private final ClassLoader earlyPluginLoader;
     private ClassLoader runtimeLoader;
+
+    static {
+        try {
+            // Get Unsafe instance
+            Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe");
+            unsafeField.setAccessible(true);
+            Unsafe unsafe = (Unsafe) unsafeField.get(null);
+
+            // Use Unsafe to obtain the trusted IMPL_LOOKUP which bypasses all module restrictions
+            Field implLookupField = MethodHandles.Lookup.class.getDeclaredField("IMPL_LOOKUP");
+            long fieldOffset = unsafe.staticFieldOffset(implLookupField);
+            Object fieldBase = unsafe.staticFieldBase(implLookupField);
+            trustedLookup = (MethodHandles.Lookup) unsafe.getObject(fieldBase, fieldOffset);
+            Constants.log("Obtained trusted IMPL_LOOKUP via Unsafe");
+        } catch (Exception e) {
+            Constants.log("Failed to obtain trusted lookup: " + e.getMessage());
+        }
+    }
 
     private LaunchEnvironment(ClassLoader earlyPluginLoader, ClassLoader systemLoader) {
         this.systemLoader = systemLoader;
@@ -60,8 +81,9 @@ public class LaunchEnvironment {
 
     /**
      * Captures and stores the runtime class loader for later lookups.
-     * Also injects the Hyxin JAR into the runtime loader so that mixin runtime
-     * classes (like CallbackInfo) are accessible to transformed classes.
+     * Also injects the Hyxin JAR and early plugin JARs into the runtime loader so that
+     * mixin runtime classes (like CallbackInfo) and early plugin classes are accessible
+     * to transformed classes.
      *
      * @param loader The runtime class loader.
      * @throws IllegalStateException if the runtime loader has already been captured.
@@ -72,109 +94,65 @@ public class LaunchEnvironment {
         }
         this.runtimeLoader = loader;
 
-        // Inject Hyxin's JAR URL into the runtime loader so mixin runtime classes
-        // (CallbackInfo, CallbackInfoReturnable, etc.) are available to transformed code.
-        this.injectMixinRuntimeClasses(loader);
+        // Inject JARs into the runtime loader so mixin runtime classes and early plugin
+        // classes are available to transformed code.
+        this.injectEarlyPluginClasses(loader);
     }
 
     /**
-     * Injects the Hyxin JAR (which contains shaded mixin runtime classes) into
-     * the runtime classloader, allowing transformed classes to access mixin
-     * runtime types like CallbackInfo.
+     * Injects mixin runtime classes and early plugin classes into the runtime classloader,
+     * allowing transformed classes to access mixin runtime types like CallbackInfo
+     * and event classes from early plugins.
      *
      * @param runtimeLoader The runtime class loader to inject into.
      */
-    private void injectMixinRuntimeClasses(ClassLoader runtimeLoader) {
+    private void injectEarlyPluginClasses(ClassLoader runtimeLoader) {
+        if (trustedLookup == null) {
+            Constants.log("WARNING: No trusted lookup available, cannot inject JARs into runtime classloader");
+            return;
+        }
+
+        if (!(runtimeLoader instanceof URLClassLoader)) {
+            Constants.log("WARNING: Runtime loader is not a URLClassLoader, cannot inject JARs");
+            return;
+        }
+
+        // Inject Hyxin's JAR for mixin runtime classes (CallbackInfo, etc.)
         try {
-            // Get Hyxin's JAR URL from its own class location
             URL hyxinUrl = this.getClass().getProtectionDomain().getCodeSource().getLocation();
-            Constants.log("Attempting to inject Hyxin JAR into runtime classloader: " + hyxinUrl);
-
-            // Try to add the URL to the runtime classloader
-            if (addUrlToClassLoader(runtimeLoader, hyxinUrl)) {
-                Constants.log("Successfully injected Hyxin JAR into runtime classloader");
-            } else {
-                Constants.log("WARNING: Could not inject Hyxin JAR into runtime classloader. " +
-                    "@Inject mixins with CallbackInfo may not work.");
-            }
-        } catch (Exception e) {
+            addUrlToClassLoader((URLClassLoader) runtimeLoader, hyxinUrl);
+            Constants.log("Injected Hyxin JAR: " + hyxinUrl);
+        } catch (Throwable e) {
             Constants.log("WARNING: Failed to inject Hyxin JAR: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
-
-    /**
-     * Attempts to add a URL to a classloader using reflection.
-     * Supports both URLClassLoader and Hytale's TransformingClassLoader.
-     *
-     * @param loader The classloader to add the URL to.
-     * @param url The URL to add.
-     * @return true if successful, false otherwise.
-     */
-    private boolean addUrlToClassLoader(ClassLoader loader, URL url) {
-        // First, try the standard URLClassLoader approach
-        if (loader instanceof URLClassLoader) {
-            try {
-                Method addUrl = URLClassLoader.class.getDeclaredMethod("addURL", URL.class);
-                addUrl.setAccessible(true);
-                addUrl.invoke(loader, url);
-                return true;
-            } catch (Exception e) {
-                Constants.log("URLClassLoader addURL failed: " + e.getMessage());
-            }
         }
 
-        // Try to find an addURL method on the actual class (TransformingClassLoader has one)
-        try {
-            Method addUrl = loader.getClass().getDeclaredMethod("addURL", URL.class);
-            addUrl.setAccessible(true);
-            addUrl.invoke(loader, url);
-            return true;
-        } catch (NoSuchMethodException e) {
-            // Method doesn't exist, try field injection
-        } catch (Exception e) {
-            Constants.log("Direct addURL failed: " + e.getMessage());
-        }
+        // Inject all early plugin JARs so their classes (like event classes) are accessible
+        if (this.earlyPluginLoader instanceof URLClassLoader) {
+            URLClassLoader earlyLoader = (URLClassLoader) this.earlyPluginLoader;
+            URL[] earlyUrls = earlyLoader.getURLs();
+            Constants.log("Injecting " + earlyUrls.length + " early plugin JARs into runtime classloader");
 
-        // Try to access the internal URL collection via reflection
-        // TransformingClassLoader typically has a 'urls' or 'ucp' field
-        try {
-            // Try common field names for URL storage
-            for (String fieldName : new String[]{"urls", "ucp", "path"}) {
+            for (URL url : earlyUrls) {
                 try {
-                    Field field = findField(loader.getClass(), fieldName);
-                    if (field != null) {
-                        field.setAccessible(true);
-                        Object urlCollection = field.get(loader);
-                        if (urlCollection instanceof Set) {
-                            @SuppressWarnings("unchecked")
-                            Set<URL> urls = (Set<URL>) urlCollection;
-                            urls.add(url);
-                            return true;
-                        }
-                    }
-                } catch (Exception ignored) {
+                    addUrlToClassLoader((URLClassLoader) runtimeLoader, url);
+                    Constants.log("Injected early plugin: " + url);
+                } catch (Throwable e) {
+                    Constants.log("WARNING: Failed to inject " + url + ": " + e.getMessage());
                 }
             }
-        } catch (Exception e) {
-            Constants.log("Field injection failed: " + e.getMessage());
         }
-
-        return false;
     }
 
     /**
-     * Recursively searches for a field in a class and its superclasses.
+     * Adds a URL to a URLClassLoader using the trusted IMPL_LOOKUP.
+     *
+     * @param loader The classloader to add the URL to.
+     * @param url    The URL to add.
      */
-    private Field findField(Class<?> clazz, String name) {
-        while (clazz != null && clazz != Object.class) {
-            try {
-                return clazz.getDeclaredField(name);
-            } catch (NoSuchFieldException e) {
-                clazz = clazz.getSuperclass();
-            }
-        }
-        return null;
+    private void addUrlToClassLoader(URLClassLoader loader, URL url) throws Throwable {
+        MethodHandle addUrl = trustedLookup.findVirtual(URLClassLoader.class, "addURL",
+            MethodType.methodType(void.class, URL.class));
+        addUrl.invoke(loader, url);
     }
 
     /**
