@@ -5,6 +5,11 @@ import org.objectweb.asm.ClassReader;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.util.Set;
 
 /**
  * Provides a unified environment for managing and resolving classes and resources across multiple class loaders used
@@ -55,6 +60,8 @@ public class LaunchEnvironment {
 
     /**
      * Captures and stores the runtime class loader for later lookups.
+     * Also injects the Hyxin JAR into the runtime loader so that mixin runtime
+     * classes (like CallbackInfo) are accessible to transformed classes.
      *
      * @param loader The runtime class loader.
      * @throws IllegalStateException if the runtime loader has already been captured.
@@ -64,6 +71,110 @@ public class LaunchEnvironment {
             throw new IllegalStateException("Runtime ClassLoader has already been captured! '" + this.runtimeLoader + "'");
         }
         this.runtimeLoader = loader;
+
+        // Inject Hyxin's JAR URL into the runtime loader so mixin runtime classes
+        // (CallbackInfo, CallbackInfoReturnable, etc.) are available to transformed code.
+        this.injectMixinRuntimeClasses(loader);
+    }
+
+    /**
+     * Injects the Hyxin JAR (which contains shaded mixin runtime classes) into
+     * the runtime classloader, allowing transformed classes to access mixin
+     * runtime types like CallbackInfo.
+     *
+     * @param runtimeLoader The runtime class loader to inject into.
+     */
+    private void injectMixinRuntimeClasses(ClassLoader runtimeLoader) {
+        try {
+            // Get Hyxin's JAR URL from its own class location
+            URL hyxinUrl = this.getClass().getProtectionDomain().getCodeSource().getLocation();
+            Constants.log("Attempting to inject Hyxin JAR into runtime classloader: " + hyxinUrl);
+
+            // Try to add the URL to the runtime classloader
+            if (addUrlToClassLoader(runtimeLoader, hyxinUrl)) {
+                Constants.log("Successfully injected Hyxin JAR into runtime classloader");
+            } else {
+                Constants.log("WARNING: Could not inject Hyxin JAR into runtime classloader. " +
+                    "@Inject mixins with CallbackInfo may not work.");
+            }
+        } catch (Exception e) {
+            Constants.log("WARNING: Failed to inject Hyxin JAR: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Attempts to add a URL to a classloader using reflection.
+     * Supports both URLClassLoader and Hytale's TransformingClassLoader.
+     *
+     * @param loader The classloader to add the URL to.
+     * @param url The URL to add.
+     * @return true if successful, false otherwise.
+     */
+    private boolean addUrlToClassLoader(ClassLoader loader, URL url) {
+        // First, try the standard URLClassLoader approach
+        if (loader instanceof URLClassLoader) {
+            try {
+                Method addUrl = URLClassLoader.class.getDeclaredMethod("addURL", URL.class);
+                addUrl.setAccessible(true);
+                addUrl.invoke(loader, url);
+                return true;
+            } catch (Exception e) {
+                Constants.log("URLClassLoader addURL failed: " + e.getMessage());
+            }
+        }
+
+        // Try to find an addURL method on the actual class (TransformingClassLoader has one)
+        try {
+            Method addUrl = loader.getClass().getDeclaredMethod("addURL", URL.class);
+            addUrl.setAccessible(true);
+            addUrl.invoke(loader, url);
+            return true;
+        } catch (NoSuchMethodException e) {
+            // Method doesn't exist, try field injection
+        } catch (Exception e) {
+            Constants.log("Direct addURL failed: " + e.getMessage());
+        }
+
+        // Try to access the internal URL collection via reflection
+        // TransformingClassLoader typically has a 'urls' or 'ucp' field
+        try {
+            // Try common field names for URL storage
+            for (String fieldName : new String[]{"urls", "ucp", "path"}) {
+                try {
+                    Field field = findField(loader.getClass(), fieldName);
+                    if (field != null) {
+                        field.setAccessible(true);
+                        Object urlCollection = field.get(loader);
+                        if (urlCollection instanceof Set) {
+                            @SuppressWarnings("unchecked")
+                            Set<URL> urls = (Set<URL>) urlCollection;
+                            urls.add(url);
+                            return true;
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (Exception e) {
+            Constants.log("Field injection failed: " + e.getMessage());
+        }
+
+        return false;
+    }
+
+    /**
+     * Recursively searches for a field in a class and its superclasses.
+     */
+    private Field findField(Class<?> clazz, String name) {
+        while (clazz != null && clazz != Object.class) {
+            try {
+                return clazz.getDeclaredField(name);
+            } catch (NoSuchFieldException e) {
+                clazz = clazz.getSuperclass();
+            }
+        }
+        return null;
     }
 
     /**
