@@ -12,6 +12,7 @@
   "ServerVersion": "${server_version}",
   "Dependencies": {},
   "OptionalDependencies": {},
+  "Main": "com.build_9.hyxin.HyxinPlugin",
   "DisabledByDefault": false,
   "Hyxin": {
     "Configs": [
